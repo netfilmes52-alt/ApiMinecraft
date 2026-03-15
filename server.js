@@ -280,10 +280,17 @@ app.get('/painel/auth/callback', async (req, res) => {
       { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
     );
     const { access_token } = tokenRes.data;
-    const [userRes, guildsRes] = await Promise.all([
-      axios.get('https://discord.com/api/users/@me', { headers: { Authorization: `Bearer ${access_token}` } }),
-      axios.get('https://discord.com/api/users/@me/guilds', { headers: { Authorization: `Bearer ${access_token}` } })
-    ]);
+
+    // Delay pra evitar rate limit do Discord
+    await new Promise(r => setTimeout(r, 800));
+    const userRes = await axios.get('https://discord.com/api/users/@me', {
+      headers: { Authorization: `Bearer ${access_token}` }
+    });
+
+    await new Promise(r => setTimeout(r, 800));
+    const guildsRes = await axios.get('https://discord.com/api/users/@me/guilds', {
+      headers: { Authorization: `Bearer ${access_token}` }
+    });
     const guildsAdmin = guildsRes.data.filter(g => (BigInt(g.permissions) & BigInt(0x8)) === BigInt(0x8));
     req.session.usuario = {
       id: userRes.data.id, username: userRes.data.username,
