@@ -13,7 +13,7 @@ const DISCORD_CLIENT_ID     = process.env.DISCORD_CLIENT_ID     || '148257258443
 const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET || '4ZTDl_AyisqQhFx7-Gd4LCSS-Ft6Yd8q';
 const PANEL_SECRET          = process.env.PANEL_SECRET          || 'mc_secret_2026';
 const PANEL_URL             = process.env.PANEL_URL             || 'https://mc-panel-nu.vercel.app';
-const API_URL               = process.env.RENDER_EXTERNAL_URL   || 'https://apiminecraft.onrender.com';
+const API_URL               = process.env.API_URL || process.env.RENDER_EXTERNAL_URL || 'https://apiminecraft-production.up.railway.app';
 const REDIRECT_URI          = `${API_URL}/painel/auth/callback`;
 
 // ─── Firebase ────────────────────────────────────────────────────
