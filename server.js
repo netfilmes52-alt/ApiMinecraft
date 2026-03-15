@@ -2,7 +2,6 @@ const express       = require('express');
 const axios         = require('axios');
 const cors          = require('cors');
 const cookieSession = require('cookie-session');
-const crypto        = require('crypto');
 const mcData        = require('minecraft-data')('1.20.1');
 
 const app  = express();
@@ -208,23 +207,16 @@ app.get('/item/:nome', (req, res) => {
 //  PAINEL - AUTH DISCORD
 // ════════════════════════════════════════════════════════════════
 app.get('/painel/auth/discord', (req, res) => {
-  const state = crypto.randomBytes(16).toString('hex');
-  req.session.oauthState = state;
   const params = new URLSearchParams({
     client_id: DISCORD_CLIENT_ID, redirect_uri: REDIRECT_URI,
-    response_type: 'code', scope: 'identify guilds', state,
+    response_type: 'code', scope: 'identify guilds',
   });
   res.redirect(`https://discord.com/api/oauth2/authorize?${params}`);
 });
 
 app.get('/painel/auth/callback', async (req, res) => {
-  const { code, state } = req.query;
+  const { code } = req.query;
   if (!code) return res.redirect(`${PANEL_URL}?erro=auth_falhou`);
-
-  // Avisa se state sumiu (Render reiniciou), mas continua o login
-  if (state !== req.session.oauthState) {
-    console.warn('[PAINEL] State mismatch — Render provavelmente reiniciou. Continuando...');
-  }
 
   try {
     const tokenData = await discordRequest(() =>
