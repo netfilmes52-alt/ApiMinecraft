@@ -63,23 +63,9 @@ function autenticado(req, res, next) {
   next();
 }
 
-// ✅ FIX: Retry automático quando Discord retorna 429
-async function discordRequest(fn, maxRetries = 4) {
-  for (let tentativa = 0; tentativa < maxRetries; tentativa++) {
-    try {
-      return await fn();
-    } catch (err) {
-      if (err.response?.status === 429) {
-        const retryAfter = parseFloat(err.response.headers['retry-after'] || '3');
-        const espera = Math.ceil(retryAfter * 1000) + 500;
-        console.log(`[429] Rate limit Discord. Aguardando ${espera}ms... (tentativa ${tentativa + 1}/${maxRetries})`);
-        await new Promise(r => setTimeout(r, espera));
-        if (tentativa === maxRetries - 1) throw err;
-      } else {
-        throw err;
-      }
-    }
-  }
+// Wrapper Discord — SEM retry. Falha rápido e deixa o usuário tentar de novo.
+async function discordRequest(fn) {
+  return await fn();
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -241,7 +227,6 @@ app.get('/painel/auth/callback', async (req, res) => {
   }
 
   try {
-    // ✅ FIX: discordRequest() faz retry automático em 429
     const tokenData = await discordRequest(() =>
       axios.post('https://discord.com/api/oauth2/token',
         new URLSearchParams({
@@ -276,6 +261,12 @@ app.get('/painel/auth/callback', async (req, res) => {
 
     res.redirect(`${PANEL_URL}/dashboard`);
   } catch (err) {
+    if (err.response?.status === 429) {
+      const retryAfter = err.response.headers['retry-after'] || '60';
+      const minutos = Math.ceil(parseFloat(retryAfter) / 60);
+      console.error(`[PAINEL] Rate limit Discord (429). Tente novamente em ${minutos} min.`);
+      return res.redirect(`${PANEL_URL}?erro=rate_limit&wait=${minutos}`);
+    }
     console.error('[PAINEL] Erro auth:', err.message);
     res.redirect(`${PANEL_URL}?erro=auth_falhou`);
   }
