@@ -1,8 +1,7 @@
-const express       = require('express');
-const axios         = require('axios');
-const cors          = require('cors');
-const cookieSession = require('cookie-session');
-const mcData        = require('minecraft-data')('1.20.1');
+const express  = require('express');
+const axios    = require('axios');
+const cors     = require('cors');
+const mcData   = require('minecraft-data')('1.20.1');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -10,14 +9,13 @@ const PORT = process.env.PORT || 3000;
 // ─── Credenciais ─────────────────────────────────────────────────
 const DISCORD_CLIENT_ID     = process.env.DISCORD_CLIENT_ID     || '1482572584431390772';
 const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET || '4ZTDl_AyisqQhFx7-Gd4LCSS-Ft6Yd8q';
-const PANEL_SECRET          = process.env.PANEL_SECRET          || 'mc_secret_2026';
 const PANEL_URL             = process.env.PANEL_URL             || 'https://mc-panel-nu.vercel.app';
-const API_URL               = process.env.API_URL || process.env.RENDER_EXTERNAL_URL || 'https://apiminecraft-production.up.railway.app';
+const API_URL               = process.env.API_URL || 'https://apiminecraft-production.up.railway.app';
 const REDIRECT_URI          = `${API_URL}/painel/auth/callback`;
 
 // ─── Firebase ────────────────────────────────────────────────────
-const { initializeApp }                      = require('firebase/app');
-const { getDatabase, ref, get, update }      = require('firebase/database');
+const { initializeApp }                  = require('firebase/app');
+const { getDatabase, ref, get, update }  = require('firebase/database');
 
 const firebaseApp = initializeApp({
   apiKey:            process.env.FIREBASE_API_KEY,
@@ -38,33 +36,28 @@ async function setConfig(guildId, data) {
   await update(ref(db, `servidores/${guildId}`), data);
 }
 
+// ─── Store de sessões em memória (token → usuario) ────────────────
+const sessions = new Map();
+
+function gerarToken() {
+  return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
 // ─── Middlewares ─────────────────────────────────────────────────
-app.use(cors({ origin: PANEL_URL, credentials: true }));
+app.use(cors({ origin: '*' }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-// ✅ FIX: cookie-session salva sessão no cookie (não perde ao reiniciar)
-app.use(cookieSession({
-  name: 'mcsession',
-  secret: PANEL_SECRET,
-  maxAge: 24 * 60 * 60 * 1000,
-  httpOnly: true,
-  sameSite: 'none',
-  secure: true,
-}));
 
 // ─── Helpers ─────────────────────────────────────────────────────
 function formatUUID(raw) {
   return raw.replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, '$1-$2-$3-$4-$5');
 }
-function autenticado(req, res, next) {
-  if (!req.session?.usuario) return res.status(401).json({ erro: 'Nao autenticado.' });
-  next();
-}
 
-// Wrapper Discord — SEM retry. Falha rápido e deixa o usuário tentar de novo.
-async function discordRequest(fn) {
-  return await fn();
+function autenticado(req, res, next) {
+  const token = req.headers['authorization']?.replace('Bearer ', '') || req.query.token;
+  if (!token || !sessions.has(token)) return res.status(401).json({ erro: 'Nao autenticado.' });
+  req.usuario = sessions.get(token);
+  next();
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -219,44 +212,37 @@ app.get('/painel/auth/callback', async (req, res) => {
   if (!code) return res.redirect(`${PANEL_URL}?erro=auth_falhou`);
 
   try {
-    const tokenData = await discordRequest(() =>
-      axios.post('https://discord.com/api/oauth2/token',
-        new URLSearchParams({
-          client_id: DISCORD_CLIENT_ID, client_secret: DISCORD_CLIENT_SECRET,
-          grant_type: 'authorization_code', code, redirect_uri: REDIRECT_URI,
-        }),
-        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
-      ).then(r => r.data)
+    const tokenRes = await axios.post('https://discord.com/api/oauth2/token',
+      new URLSearchParams({
+        client_id: DISCORD_CLIENT_ID, client_secret: DISCORD_CLIENT_SECRET,
+        grant_type: 'authorization_code', code, redirect_uri: REDIRECT_URI,
+      }),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
     );
+    const { access_token } = tokenRes.data;
 
-    const { access_token } = tokenData;
-
-    // Busca usuário e guilds em paralelo
     const [userData, guildsData] = await Promise.all([
-      discordRequest(() =>
-        axios.get('https://discord.com/api/users/@me', { headers: { Authorization: `Bearer ${access_token}` } }).then(r => r.data)
-      ),
-      discordRequest(() =>
-        axios.get('https://discord.com/api/users/@me/guilds', { headers: { Authorization: `Bearer ${access_token}` } }).then(r => r.data)
-      ),
+      axios.get('https://discord.com/api/users/@me', { headers: { Authorization: `Bearer ${access_token}` } }).then(r => r.data),
+      axios.get('https://discord.com/api/users/@me/guilds', { headers: { Authorization: `Bearer ${access_token}` } }).then(r => r.data),
     ]);
 
     const guildsAdmin = guildsData.filter(g => (BigInt(g.permissions) & BigInt(0x8)) === BigInt(0x8));
 
-    // ✅ FIX: sessão fica no cookie, não na RAM
-    req.session.usuario = {
+    // Gera token e salva em memória
+    const token = gerarToken();
+    sessions.set(token, {
       id: userData.id,
       username: userData.username,
       avatar: userData.avatar,
       guilds: guildsAdmin,
-    };
+    });
 
-    res.redirect(`${PANEL_URL}/dashboard`);
+    // Passa token na URL — frontend salva no sessionStorage
+    res.redirect(`${PANEL_URL}/dashboard?token=${token}`);
   } catch (err) {
     if (err.response?.status === 429) {
       const retryAfter = err.response.headers['retry-after'] || '60';
       const minutos = Math.ceil(parseFloat(retryAfter) / 60);
-      console.error(`[PAINEL] Rate limit Discord (429). Tente novamente em ${minutos} min.`);
       return res.redirect(`${PANEL_URL}?erro=rate_limit&wait=${minutos}`);
     }
     console.error('[PAINEL] Erro auth:', err.message);
@@ -265,12 +251,13 @@ app.get('/painel/auth/callback', async (req, res) => {
 });
 
 app.get('/painel/auth/logout', (req, res) => {
-  req.session = null; // cookie-session: limpa setando null
+  const token = req.query.token;
+  if (token) sessions.delete(token);
   res.redirect(PANEL_URL);
 });
 
 app.get('/painel/auth/me', autenticado, (req, res) => {
-  const u = req.session.usuario;
+  const u = req.usuario;
   res.json({
     id: u.id, username: u.username,
     avatar: u.avatar
@@ -284,7 +271,7 @@ app.get('/painel/auth/me', autenticado, (req, res) => {
 // ════════════════════════════════════════════════════════════════
 app.get('/painel/guilds', autenticado, async (req, res) => {
   try {
-    const guilds = req.session.usuario.guilds;
+    const guilds = req.usuario.guilds;
     const resultado = await Promise.all(guilds.map(async g => {
       const config = await getConfig(g.id);
       return {
@@ -305,11 +292,11 @@ app.get('/painel/guilds', autenticado, async (req, res) => {
 
 app.get('/painel/guild/:id', autenticado, async (req, res) => {
   const { id } = req.params;
-  if (!req.session.usuario.guilds.some(g => g.id === id))
+  if (!req.usuario.guilds.some(g => g.id === id))
     return res.status(403).json({ erro: 'Sem acesso a este servidor.' });
   try {
     const config = await getConfig(id);
-    const guild  = req.session.usuario.guilds.find(g => g.id === id);
+    const guild  = req.usuario.guilds.find(g => g.id === id);
     res.json({
       id, nome: guild.name,
       icone: guild.icon ? `https://cdn.discordapp.com/icons/${id}/${guild.icon}.png` : null,
@@ -326,7 +313,7 @@ app.get('/painel/guild/:id', autenticado, async (req, res) => {
 
 app.post('/painel/guild/:id/save', autenticado, async (req, res) => {
   const { id } = req.params;
-  if (!req.session.usuario.guilds.some(g => g.id === id))
+  if (!req.usuario.guilds.some(g => g.id === id))
     return res.status(403).json({ erro: 'Sem acesso a este servidor.' });
   try {
     const { ip, porta, nome_servidor, cor_embed, canal_alertas, cargo_admin } = req.body;
