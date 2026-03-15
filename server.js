@@ -76,48 +76,58 @@ async function getServerInfo(req, res, ip, porta) {
   }
 }
 
-// ─── INFO DO JOGADOR ────────────────────────────────────────────
+// ─── INFO DO JOGADOR (API oficial Mojang) ───────────────────────
 app.get('/player/:username', async (req, res) => {
   try {
     const { username } = req.params;
-    const { data } = await axios.get(
-      `https://playerdb.co/api/player/minecraft/${username}`,
+
+    const profileRes = await axios.get(
+      `https://api.mojang.com/users/profiles/minecraft/${username}`,
       { timeout: 10000 }
     );
 
-    if (!data.success) {
+    if (!profileRes.data || !profileRes.data.id) {
       return res.status(404).json({ erro: 'Jogador não encontrado.' });
     }
 
-    const player = data.data.player;
+    const uuid_sem_hifen = profileRes.data.id;
+    const nome = profileRes.data.name;
+
+    const uuid = uuid_sem_hifen.replace(
+      /^(.{8})(.{4})(.{4})(.{4})(.{12})$/,
+      '$1-$2-$3-$4-$5'
+    );
 
     res.json({
-      username: player.username,
-      uuid: player.id,
-      uuid_sem_hifen: player.raw_id,
-      skin_url: `https://crafatar.com/renders/body/${player.id}?overlay`,
-      avatar_url: `https://crafatar.com/avatars/${player.id}?overlay`,
-      head_url: `https://crafatar.com/renders/head/${player.id}?overlay`,
-      historico_nomes: player.meta?.name_history || []
+      username: nome,
+      uuid: uuid,
+      uuid_sem_hifen: uuid_sem_hifen,
+      skin_url: `https://crafatar.com/renders/body/${uuid}?overlay`,
+      avatar_url: `https://crafatar.com/avatars/${uuid}?overlay`,
+      head_url: `https://crafatar.com/renders/head/${uuid}?overlay`,
+      cape_url: `https://crafatar.com/capes/${uuid}`
     });
+
   } catch (err) {
+    if (err.response?.status === 404) {
+      return res.status(404).json({ erro: 'Jogador não encontrado.' });
+    }
     res.status(500).json({ erro: 'Falha ao buscar jogador.', detalhe: err.message });
   }
 });
 
-// ─── REDIRECIONA PARA SKIN (imagem) ─────────────────────────────
+// ─── REDIRECIONA PARA SKIN (corpo) ──────────────────────────────
 app.get('/skin/:username', async (req, res) => {
   try {
     const { username } = req.params;
     const { data } = await axios.get(
-      `https://playerdb.co/api/player/minecraft/${username}`,
+      `https://api.mojang.com/users/profiles/minecraft/${username}`,
       { timeout: 10000 }
     );
 
-    if (!data.success) return res.status(404).json({ erro: 'Jogador não encontrado.' });
+    if (!data?.id) return res.status(404).json({ erro: 'Jogador não encontrado.' });
 
-    const uuid = data.data.player.id;
-    res.redirect(`https://crafatar.com/renders/body/${uuid}?overlay`);
+    res.redirect(`https://crafatar.com/renders/body/${data.id}?overlay`);
   } catch (err) {
     res.status(500).json({ erro: 'Falha ao buscar skin.', detalhe: err.message });
   }
@@ -128,14 +138,13 @@ app.get('/avatar/:username', async (req, res) => {
   try {
     const { username } = req.params;
     const { data } = await axios.get(
-      `https://playerdb.co/api/player/minecraft/${username}`,
+      `https://api.mojang.com/users/profiles/minecraft/${username}`,
       { timeout: 10000 }
     );
 
-    if (!data.success) return res.status(404).json({ erro: 'Jogador não encontrado.' });
+    if (!data?.id) return res.status(404).json({ erro: 'Jogador não encontrado.' });
 
-    const uuid = data.data.player.id;
-    res.redirect(`https://crafatar.com/avatars/${uuid}?overlay&size=128`);
+    res.redirect(`https://crafatar.com/avatars/${data.id}?overlay&size=128`);
   } catch (err) {
     res.status(500).json({ erro: 'Falha ao buscar avatar.', detalhe: err.message });
   }
