@@ -1,6 +1,6 @@
 {
   "name": "minecraft-api",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "API Minecraft - Servidores e Jogadores",
   "main": "server.js",
   "scripts": {
@@ -10,7 +10,8 @@
   "dependencies": {
     "express": "^4.18.2",
     "axios": "^1.6.0",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "minecraft-data": "^3.60.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
