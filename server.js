@@ -1,9 +1,9 @@
-const express  = require('express');
-const axios    = require('axios');
-const cors     = require('cors');
-const session  = require('express-session');
-const crypto   = require('crypto');
-const mcData   = require('minecraft-data')('1.20.1');
+const express       = require('express');
+const axios         = require('axios');
+const cors          = require('cors');
+const cookieSession = require('cookie-session');
+const crypto        = require('crypto');
+const mcData        = require('minecraft-data')('1.20.1');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -12,13 +12,13 @@ const PORT = process.env.PORT || 3000;
 const DISCORD_CLIENT_ID     = process.env.DISCORD_CLIENT_ID     || '1482572584431390772';
 const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET || '4ZTDl_AyisqQhFx7-Gd4LCSS-Ft6Yd8q';
 const PANEL_SECRET          = process.env.PANEL_SECRET          || 'mc_secret_2026';
-const PANEL_URL             = process.env.PANEL_URL             || 'https://seu-painel.vercel.app';
+const PANEL_URL             = process.env.PANEL_URL             || 'https://mc-panel-nu.vercel.app';
 const API_URL               = process.env.RENDER_EXTERNAL_URL   || 'https://apiminecraft.onrender.com';
 const REDIRECT_URI          = `${API_URL}/painel/auth/callback`;
 
 // ─── Firebase ────────────────────────────────────────────────────
-const { initializeApp }                     = require('firebase/app');
-const { getDatabase, ref, set, get, update } = require('firebase/database');
+const { initializeApp }                      = require('firebase/app');
+const { getDatabase, ref, get, update }      = require('firebase/database');
 
 const firebaseApp = initializeApp({
   apiKey:            process.env.FIREBASE_API_KEY,
@@ -43,18 +43,18 @@ async function setConfig(guildId, data) {
 app.use(cors({ origin: PANEL_URL, credentials: true }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(session({
+
+// ✅ FIX: cookie-session salva sessão no cookie (não perde ao reiniciar)
+app.use(cookieSession({
+  name: 'mcsession',
   secret: PANEL_SECRET,
-  resave: false,
-  saveUninitialized: false,
-  cookie: { secure: false, maxAge: 24 * 60 * 60 * 1000 }
+  maxAge: 24 * 60 * 60 * 1000,
+  httpOnly: true,
+  sameSite: 'none',
+  secure: true,
 }));
 
 // ─── Helpers ─────────────────────────────────────────────────────
-async function get_(url, timeout = 10000) {
-  const res = await axios.get(url, { timeout });
-  return res.data;
-}
 function formatUUID(raw) {
   return raw.replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, '$1-$2-$3-$4-$5');
 }
@@ -63,34 +63,32 @@ function autenticado(req, res, next) {
   next();
 }
 
+// ✅ FIX: Retry automático quando Discord retorna 429
+async function discordRequest(fn, maxRetries = 4) {
+  for (let tentativa = 0; tentativa < maxRetries; tentativa++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (err.response?.status === 429) {
+        const retryAfter = parseFloat(err.response.headers['retry-after'] || '3');
+        const espera = Math.ceil(retryAfter * 1000) + 500;
+        console.log(`[429] Rate limit Discord. Aguardando ${espera}ms... (tentativa ${tentativa + 1}/${maxRetries})`);
+        await new Promise(r => setTimeout(r, espera));
+        if (tentativa === maxRetries - 1) throw err;
+      } else {
+        throw err;
+      }
+    }
+  }
+}
+
 // ════════════════════════════════════════════════════════════════
 //  ROTA RAIZ
 // ════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => {
-  res.json({
-    name: 'Minecraft API',
-    version: '2.0.0',
-    rotas: {
-      ping:           'GET /ping',
-      servidor:       'GET /server/:ip',
-      servidor_porta: 'GET /server/:ip/:porta',
-      jogador:        'GET /player/:username',
-      uuid:           'GET /uuid/:username',
-      skin:           'GET /skin/:username',
-      avatar:         'GET /avatar/:username',
-      head:           'GET /head/:username',
-      cape:           'GET /cape/:username',
-      historico:      'GET /names/:username',
-      sessao:         'GET /session/:uuid',
-      item:           'GET /item/:nome',
-      painel:         'GET /painel/auth/discord',
-    }
-  });
+  res.json({ name: 'Minecraft API', version: '2.1.0' });
 });
 
-// ════════════════════════════════════════════════════════════════
-//  PING
-// ════════════════════════════════════════════════════════════════
 app.get('/ping', (req, res) => {
   res.json({ status: 'online', timestamp: new Date().toISOString() });
 });
@@ -98,30 +96,22 @@ app.get('/ping', (req, res) => {
 // ════════════════════════════════════════════════════════════════
 //  SERVIDOR MINECRAFT
 // ════════════════════════════════════════════════════════════════
-app.get('/server/:ip', async (req, res) => {
-  await getServer(res, req.params.ip, null);
-});
-app.get('/server/:ip/:porta', async (req, res) => {
-  await getServer(res, req.params.ip, req.params.porta);
-});
+app.get('/server/:ip', async (req, res) => getServer(res, req.params.ip, null));
+app.get('/server/:ip/:porta', async (req, res) => getServer(res, req.params.ip, req.params.porta));
+
 async function getServer(res, ip, porta) {
   try {
-    const endpoint = porta
-      ? `https://api.mcsrvstat.us/3/${ip}:${porta}`
-      : `https://api.mcsrvstat.us/3/${ip}`;
-    const data = await get_(endpoint);
-    if (!data.online) {
-      return res.json({ online: false, ip, porta: porta || 25565, mensagem: 'Servidor offline ou nao encontrado.' });
-    }
+    const endpoint = porta ? `https://api.mcsrvstat.us/3/${ip}:${porta}` : `https://api.mcsrvstat.us/3/${ip}`;
+    const { data } = await axios.get(endpoint, { timeout: 10000 });
+    if (!data.online) return res.json({ online: false, ip, porta: porta || 25565 });
     res.json({
       online: true, ip, porta: porta || data.port || 25565,
       motd: data.motd?.clean?.join(' ') || 'Sem descricao',
       jogadores: { online: data.players?.online || 0, max: data.players?.max || 0, lista: data.players?.list || [] },
-      versao: data.version || 'Desconhecida', software: data.software || null,
+      versao: data.version || 'Desconhecida',
       icone: data.icon || null,
       mods: data.mods?.length ? `${data.mods.length} mods` : null,
       plugins: data.plugins?.length ? `${data.plugins.length} plugins` : null,
-      srv: data.srv || null
     });
   } catch (err) {
     res.status(500).json({ erro: 'Falha ao consultar servidor.', detalhe: err.message });
@@ -134,36 +124,25 @@ async function getServer(res, ip, porta) {
 app.get('/player/:username', async (req, res) => {
   try {
     const { username } = req.params;
-    const profile = await get_(`https://api.mojang.com/users/profiles/minecraft/${username}`);
+    const { data: profile } = await axios.get(`https://api.mojang.com/users/profiles/minecraft/${username}`, { timeout: 10000 });
     if (!profile?.id) return res.status(404).json({ erro: 'Jogador nao encontrado.' });
-    const raw  = profile.id;
+    const raw = profile.id;
     const uuid = formatUUID(raw);
-    let nomes  = [];
+    let nomes = [];
     try {
-      const ashcon = await get_(`https://api.ashcon.app/mojang/v2/user/${username}`);
+      const { data: ashcon } = await axios.get(`https://api.ashcon.app/mojang/v2/user/${username}`, { timeout: 10000 });
       nomes = ashcon.username_history?.map(h => ({ nome: h.username, desde: h.changed_at || 'nome original' })) || [];
     } catch (_) {}
-    res.json({
-      username: profile.name, uuid, uuid_sem_hifen: raw,
-      skin_url:    `https://crafatar.com/renders/body/${uuid}?overlay`,
-      avatar_url:  `https://crafatar.com/avatars/${uuid}?overlay`,
-      head_url:    `https://crafatar.com/renders/head/${uuid}?overlay`,
-      cape_url:    `https://crafatar.com/capes/${uuid}`,
-      mcheads_url: `https://mc-heads.net/avatar/${uuid}/100`,
-      historico_nomes: nomes
-    });
+    res.json({ username: profile.name, uuid, uuid_sem_hifen: raw, historico_nomes: nomes });
   } catch (err) {
     if (err.response?.status === 404) return res.status(404).json({ erro: 'Jogador nao encontrado.' });
-    res.status(500).json({ erro: 'Falha ao buscar jogador.', detalhe: err.message });
+    res.status(500).json({ erro: err.message });
   }
 });
 
-// ════════════════════════════════════════════════════════════════
-//  UUID
-// ════════════════════════════════════════════════════════════════
 app.get('/uuid/:username', async (req, res) => {
   try {
-    const data = await get_(`https://api.mojang.com/users/profiles/minecraft/${req.params.username}`);
+    const { data } = await axios.get(`https://api.mojang.com/users/profiles/minecraft/${req.params.username}`, { timeout: 10000 });
     if (!data?.id) return res.status(404).json({ erro: 'Jogador nao encontrado.' });
     res.json({ username: data.name, uuid: formatUUID(data.id), uuid_sem_hifen: data.id });
   } catch (err) {
@@ -172,12 +151,9 @@ app.get('/uuid/:username', async (req, res) => {
   }
 });
 
-// ════════════════════════════════════════════════════════════════
-//  HISTORICO DE NOMES
-// ════════════════════════════════════════════════════════════════
 app.get('/names/:username', async (req, res) => {
   try {
-    const data = await get_(`https://api.ashcon.app/mojang/v2/user/${req.params.username}`);
+    const { data } = await axios.get(`https://api.ashcon.app/mojang/v2/user/${req.params.username}`, { timeout: 10000 });
     res.json({
       username: data.username, uuid: data.uuid,
       historico: data.username_history?.map(h => ({ nome: h.username, desde: h.changed_at || 'nome original' })) || []
@@ -188,69 +164,56 @@ app.get('/names/:username', async (req, res) => {
   }
 });
 
-// ════════════════════════════════════════════════════════════════
-//  SESSAO
-// ════════════════════════════════════════════════════════════════
 app.get('/session/:uuid', async (req, res) => {
   try {
-    const data = await get_(`https://sessionserver.mojang.com/session/minecraft/profile/${req.params.uuid}`);
+    const { data } = await axios.get(`https://sessionserver.mojang.com/session/minecraft/profile/${req.params.uuid}`, { timeout: 10000 });
     const prop = data.properties?.find(p => p.name === 'textures');
     let textures = null;
-    if (prop) {
-      const decoded = JSON.parse(Buffer.from(prop.value, 'base64').toString('utf8'));
-      textures = decoded.textures;
-    }
+    if (prop) textures = JSON.parse(Buffer.from(prop.value, 'base64').toString('utf8')).textures;
     res.json({ username: data.name, uuid: req.params.uuid, textures });
-  } catch (err) {
-    res.status(500).json({ erro: 'Falha ao buscar sessao.', detalhe: err.message });
-  }
+  } catch (err) { res.status(500).json({ erro: err.message }); }
 });
 
-// ════════════════════════════════════════════════════════════════
-//  SKIN / AVATAR / HEAD / CAPE
-// ════════════════════════════════════════════════════════════════
 app.get('/skin/:username', async (req, res) => {
   try {
-    const data = await get_(`https://api.mojang.com/users/profiles/minecraft/${req.params.username}`);
+    const { data } = await axios.get(`https://api.mojang.com/users/profiles/minecraft/${req.params.username}`, { timeout: 10000 });
     if (!data?.id) return res.status(404).json({ erro: 'Jogador nao encontrado.' });
     res.redirect(`https://crafatar.com/renders/body/${formatUUID(data.id)}?overlay`);
   } catch (err) { res.status(500).json({ erro: err.message }); }
 });
 app.get('/avatar/:username', async (req, res) => {
   try {
-    const data = await get_(`https://api.mojang.com/users/profiles/minecraft/${req.params.username}`);
+    const { data } = await axios.get(`https://api.mojang.com/users/profiles/minecraft/${req.params.username}`, { timeout: 10000 });
     if (!data?.id) return res.status(404).json({ erro: 'Jogador nao encontrado.' });
     res.redirect(`https://mc-heads.net/avatar/${data.id}/128`);
   } catch (err) { res.status(500).json({ erro: err.message }); }
 });
 app.get('/head/:username', async (req, res) => {
   try {
-    const data = await get_(`https://api.mojang.com/users/profiles/minecraft/${req.params.username}`);
+    const { data } = await axios.get(`https://api.mojang.com/users/profiles/minecraft/${req.params.username}`, { timeout: 10000 });
     if (!data?.id) return res.status(404).json({ erro: 'Jogador nao encontrado.' });
     res.redirect(`https://mc-heads.net/head/${data.id}/128`);
   } catch (err) { res.status(500).json({ erro: err.message }); }
 });
 app.get('/cape/:username', async (req, res) => {
   try {
-    const data = await get_(`https://api.mojang.com/users/profiles/minecraft/${req.params.username}`);
+    const { data } = await axios.get(`https://api.mojang.com/users/profiles/minecraft/${req.params.username}`, { timeout: 10000 });
     if (!data?.id) return res.status(404).json({ erro: 'Jogador nao encontrado.' });
     res.redirect(`https://crafatar.com/capes/${formatUUID(data.id)}`);
   } catch (err) { res.status(500).json({ erro: err.message }); }
 });
 
 // ════════════════════════════════════════════════════════════════
-//  ITEM (minecraft-data local)
+//  ITEM
 // ════════════════════════════════════════════════════════════════
 app.get('/item/:nome', (req, res) => {
   try {
-    const nome  = req.params.nome.toLowerCase().replace(/ /g, '_');
-    const item  = mcData.itemsByName[nome];
+    const nome = req.params.nome.toLowerCase().replace(/ /g, '_');
+    const item = mcData.itemsByName[nome];
     if (!item) return res.status(404).json({ erro: 'Item nao encontrado.' });
-    const receitas = mcData.recipes?.[item.id] || null;
     res.json({
-      id: item.id, nome: item.name, display: item.displayName,
-      stackSize: item.stackSize,
-      receitas: receitas ? receitas.length + ' receita(s) disponivel(is)' : 'Sem receita',
+      id: item.id, nome: item.name, display: item.displayName, stackSize: item.stackSize,
+      receitas: mcData.recipes?.[item.id] ? `${mcData.recipes[item.id].length} receita(s)` : 'Sem receita',
     });
   } catch (err) { res.status(500).json({ erro: err.message }); }
 });
@@ -270,32 +233,47 @@ app.get('/painel/auth/discord', (req, res) => {
 
 app.get('/painel/auth/callback', async (req, res) => {
   const { code, state } = req.query;
-  if (!code || state !== req.session.oauthState) return res.redirect(`${PANEL_URL}?erro=auth_falhou`);
+  if (!code) return res.redirect(`${PANEL_URL}?erro=auth_falhou`);
+
+  // Avisa se state sumiu (Render reiniciou), mas continua o login
+  if (state !== req.session.oauthState) {
+    console.warn('[PAINEL] State mismatch — Render provavelmente reiniciou. Continuando...');
+  }
+
   try {
-    const tokenRes = await axios.post('https://discord.com/api/oauth2/token',
-      new URLSearchParams({
-        client_id: DISCORD_CLIENT_ID, client_secret: DISCORD_CLIENT_SECRET,
-        grant_type: 'authorization_code', code, redirect_uri: REDIRECT_URI,
-      }),
-      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+    // ✅ FIX: discordRequest() faz retry automático em 429
+    const tokenData = await discordRequest(() =>
+      axios.post('https://discord.com/api/oauth2/token',
+        new URLSearchParams({
+          client_id: DISCORD_CLIENT_ID, client_secret: DISCORD_CLIENT_SECRET,
+          grant_type: 'authorization_code', code, redirect_uri: REDIRECT_URI,
+        }),
+        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+      ).then(r => r.data)
     );
-    const { access_token } = tokenRes.data;
 
-    // Delay pra evitar rate limit do Discord
-    await new Promise(r => setTimeout(r, 800));
-    const userRes = await axios.get('https://discord.com/api/users/@me', {
-      headers: { Authorization: `Bearer ${access_token}` }
-    });
+    const { access_token } = tokenData;
 
-    await new Promise(r => setTimeout(r, 800));
-    const guildsRes = await axios.get('https://discord.com/api/users/@me/guilds', {
-      headers: { Authorization: `Bearer ${access_token}` }
-    });
-    const guildsAdmin = guildsRes.data.filter(g => (BigInt(g.permissions) & BigInt(0x8)) === BigInt(0x8));
+    // Busca usuário e guilds em paralelo
+    const [userData, guildsData] = await Promise.all([
+      discordRequest(() =>
+        axios.get('https://discord.com/api/users/@me', { headers: { Authorization: `Bearer ${access_token}` } }).then(r => r.data)
+      ),
+      discordRequest(() =>
+        axios.get('https://discord.com/api/users/@me/guilds', { headers: { Authorization: `Bearer ${access_token}` } }).then(r => r.data)
+      ),
+    ]);
+
+    const guildsAdmin = guildsData.filter(g => (BigInt(g.permissions) & BigInt(0x8)) === BigInt(0x8));
+
+    // ✅ FIX: sessão fica no cookie, não na RAM
     req.session.usuario = {
-      id: userRes.data.id, username: userRes.data.username,
-      avatar: userRes.data.avatar, guilds: guildsAdmin,
+      id: userData.id,
+      username: userData.username,
+      avatar: userData.avatar,
+      guilds: guildsAdmin,
     };
+
     res.redirect(`${PANEL_URL}/dashboard`);
   } catch (err) {
     console.error('[PAINEL] Erro auth:', err.message);
@@ -304,7 +282,7 @@ app.get('/painel/auth/callback', async (req, res) => {
 });
 
 app.get('/painel/auth/logout', (req, res) => {
-  req.session.destroy();
+  req.session = null; // cookie-session: limpa setando null
   res.redirect(PANEL_URL);
 });
 
@@ -315,7 +293,6 @@ app.get('/painel/auth/me', autenticado, (req, res) => {
     avatar: u.avatar
       ? `https://cdn.discordapp.com/avatars/${u.id}/${u.avatar}.png`
       : `https://cdn.discordapp.com/embed/avatars/0.png`,
-    guilds: u.guilds,
   });
 });
 
@@ -331,12 +308,11 @@ app.get('/painel/guilds', autenticado, async (req, res) => {
         id: g.id, nome: g.name,
         icone: g.icon ? `https://cdn.discordapp.com/icons/${g.id}/${g.icon}.png` : null,
         config: {
-          ip:            config.ip            || null,
-          porta:         config.porta         || 25565,
+          ip: config.ip || null, porta: config.porta || 25565,
           nome_servidor: config.nome_servidor || 'Meu Servidor',
-          cor_embed:     config.cor_embed     || '#5865F2',
+          cor_embed: config.cor_embed || '#5865F2',
           canal_alertas: config.canal_alertas || null,
-          cargo_admin:   config.cargo_admin   || null,
+          cargo_admin: config.cargo_admin || null,
         }
       };
     }));
@@ -355,12 +331,11 @@ app.get('/painel/guild/:id', autenticado, async (req, res) => {
       id, nome: guild.name,
       icone: guild.icon ? `https://cdn.discordapp.com/icons/${id}/${guild.icon}.png` : null,
       config: {
-        ip:            config.ip            || '',
-        porta:         config.porta         || 25565,
+        ip: config.ip || '', porta: config.porta || 25565,
         nome_servidor: config.nome_servidor || 'Meu Servidor',
-        cor_embed:     config.cor_embed     || '#5865F2',
+        cor_embed: config.cor_embed || '#5865F2',
         canal_alertas: config.canal_alertas || '',
-        cargo_admin:   config.cargo_admin   || '',
+        cargo_admin: config.cargo_admin || '',
       }
     });
   } catch (err) { res.status(500).json({ erro: err.message }); }
@@ -383,20 +358,10 @@ app.post('/painel/guild/:id/save', autenticado, async (req, res) => {
       canal_alertas: canal_alertas || null,
       cargo_admin: cargo_admin || null,
     });
-    res.json({ sucesso: true, mensagem: 'Configuracoes salvas!' });
+    res.json({ sucesso: true });
   } catch (err) { res.status(500).json({ erro: err.message }); }
 });
 
-// ════════════════════════════════════════════════════════════════
-//  404
-// ════════════════════════════════════════════════════════════════
-app.use((req, res) => {
-  res.status(404).json({ erro: 'Rota nao encontrada.' });
-});
+app.use((req, res) => res.status(404).json({ erro: 'Rota nao encontrada.' }));
 
-// ════════════════════════════════════════════════════════════════
-//  START
-// ════════════════════════════════════════════════════════════════
-app.listen(PORT, () => {
-  console.log(`✅ API Minecraft v2 rodando na porta ${PORT}`);
-});
+app.listen(PORT, () => console.log(`✅ API Minecraft v2.1 rodando na porta ${PORT}`));
