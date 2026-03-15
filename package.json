@@ -1,6 +1,6 @@
 {
   "name": "minecraft-api",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -11,6 +11,6 @@
     "cors": "^2.8.5",
     "firebase": "^10.0.0",
     "minecraft-data": "^3.60.0",
-    "express-session": "^1.17.3"
+    "cookie-session": "^2.1.0"
   }
 }
