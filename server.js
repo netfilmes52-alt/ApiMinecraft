@@ -1,6 +1,8 @@
+
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
+const mcData = require('minecraft-data')('1.20.1');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -247,16 +249,26 @@ app.get('/cape/:username', async (req, res) => {
 });
 
 // ════════════════════════════════════════════════
-//  ITEM (minecraft-api.vercel.app)
+//  ITEM (minecraft-data local, sem API externa)
 // ════════════════════════════════════════════════
-app.get('/item/:nome', async (req, res) => {
+app.get('/item/:nome', (req, res) => {
   try {
     const nome = req.params.nome.toLowerCase().replace(/ /g, '_');
-    const data = await get(`https://minecraft-api.vercel.app/api/items/${nome}`);
-    if (!data || data.error) return res.status(404).json({ erro: 'Item não encontrado.' });
-    res.json(data);
+    const item = mcData.itemsByName[nome];
+
+    if (!item) return res.status(404).json({ erro: 'Item não encontrado.' });
+
+    // Tenta pegar receita de craft
+    const receitas = mcData.recipes?.[item.id] || null;
+
+    res.json({
+      id:         item.id,
+      nome:       item.name,
+      display:    item.displayName,
+      stackSize:  item.stackSize,
+      receitas:   receitas ? receitas.length + ' receita(s) disponível(is)' : 'Sem receita',
+    });
   } catch (err) {
-    if (err.response?.status === 404) return res.status(404).json({ erro: 'Item não encontrado.' });
     res.status(500).json({ erro: err.message });
   }
 });
